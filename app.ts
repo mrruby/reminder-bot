@@ -95,16 +95,17 @@ async function markTaskComplete(taskId: string): Promise<boolean> {
   console.log(`✅ Marking task ${taskId} as complete in Nozbe`);
   
   try {
-    // According to Nozbe API docs, PUT request to /task with id and completed in body
-    const response = await axios.put(
+    // Use form-encoded data which works with Nozbe API
+    const formData = new URLSearchParams();
+    formData.append('id', taskId);
+    formData.append('completed', 'true');
+    
+    await axios.put(
       `${NOZBE_API_URL}/task`,
-      { 
-        id: taskId,
-        completed: true 
-      },
+      formData,
       {
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
           "Authorization": NOZBE_API_KEY,
           "Client": NOZBE_CLIENT_ID,
         },
@@ -112,13 +113,12 @@ async function markTaskComplete(taskId: string): Promise<boolean> {
     );
     
     console.log(`✅ Task ${taskId} marked as complete`);
-    console.log("Response:", response.data);
     return true;
   } catch (error: any) {
     console.error(`❌ Error marking task ${taskId} as complete:`, error.message);
     if (error.response) {
-      console.error("Response data:", error.response.data);
       console.error("Response status:", error.response.status);
+      console.error("Response data:", error.response.data);
     }
     return false;
   }
