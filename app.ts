@@ -189,7 +189,7 @@ slackApp.action("task_complete", async ({ action, ack, client, body }) => {
   console.log("🔔 Received Slack action");
   
   // Type guard for checkbox action
-  if (action.type === "checkboxes") {
+  if (action.type === "checkboxes" && body.type === "block_actions" && body.message) {
     const selectedTasks = action.selected_options || [];
     const checkedTaskIds = selectedTasks
       .map((opt) => opt.value)
@@ -202,15 +202,49 @@ slackApp.action("task_complete", async ({ action, ack, client, body }) => {
       await markTaskComplete(taskId);
     }
     
-    // Update Slack message with thread reply
-    if (checkedTaskIds.length > 0 && body.type === "block_actions") {
+    // Update the original message to remove completed tasks
+    if (checkedTaskIds.length > 0) {
       const channelId = body.channel?.id || SLACK_USER_ID;
-      if (channelId) {
-        await client.chat.postMessage({
+      const messageTs = body.message.ts;
+      
+      // Get the current blocks from the message
+      const currentBlocks = body.message.blocks || [];
+      
+      // Filter out the completed tasks
+      const updatedBlocks = currentBlocks.filter((block: any) => {
+        // Keep non-checkbox blocks (header, context, etc.)
+        if (block.type !== 'section' || !block.accessory?.type || block.accessory.type !== 'checkboxes') {
+          return true;
+        }
+        
+        // For checkbox blocks, check if all options were selected
+        const blockOptions = block.accessory.options || [];
+        const hasUncompletedTasks = blockOptions.some((opt: any) => 
+          !checkedTaskIds.includes(opt.value)
+        );
+        
+        // Keep the block only if it has uncompleted tasks
+        if (hasUncompletedTasks) {
+          // Update the block to remove completed options
+          block.accessory.options = blockOptions.filter((opt: any) => 
+            !checkedTaskIds.includes(opt.value)
+          );
+          return true;
+        }
+        
+        return false;
+      });
+      
+      // Update the message
+      if (channelId && messageTs) {
+        await client.chat.update({
           channel: channelId,
-          thread_ts: body.message?.ts,
-          text: `✅ Marked ${checkedTaskIds.length} task(s) as complete in Nozbe!`,
+          ts: messageTs,
+          blocks: updatedBlocks,
+          text: "Daily Tasks" // Fallback text
         });
+        
+        console.log(`✅ Removed ${checkedTaskIds.length} completed task(s) from message`);
       }
     }
   }
