@@ -95,8 +95,8 @@ async function markTaskComplete(taskId: string): Promise<boolean> {
   console.log(`✅ Marking task ${taskId} as complete in Nozbe`);
   
   try {
-    // Using API Key authentication with proper headers
-    await axios.put(
+    // According to Nozbe API docs, PUT request to /task with id and completed in body
+    const response = await axios.put(
       `${NOZBE_API_URL}/task`,
       { 
         id: taskId,
@@ -112,9 +112,14 @@ async function markTaskComplete(taskId: string): Promise<boolean> {
     );
     
     console.log(`✅ Task ${taskId} marked as complete`);
+    console.log("Response:", response.data);
     return true;
-  } catch (error) {
-    console.error(`❌ Error marking task ${taskId} as complete:`, error);
+  } catch (error: any) {
+    console.error(`❌ Error marking task ${taskId} as complete:`, error.message);
+    if (error.response) {
+      console.error("Response data:", error.response.data);
+      console.error("Response status:", error.response.status);
+    }
     return false;
   }
 }
