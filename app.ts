@@ -44,7 +44,6 @@ const slackApp = new App({
 
 // Nozbe API functions
 async function fetchNozebTasks(projectId: string): Promise<NozbeTask[]> {
-  console.log(`📋 Fetching tasks from Nozbe for project: ${projectId}`);
   
   try {
     // Using API Key authentication with proper headers
@@ -59,40 +58,32 @@ async function fetchNozebTasks(projectId: string): Promise<NozbeTask[]> {
       },
     });
     
-    // Debug: Log the raw response to understand its structure
-    console.log("📊 Raw API Response:", JSON.stringify(response.data, null, 2));
-    console.log("📊 Response type:", typeof response.data);
-    console.log("📊 Is Array?", Array.isArray(response.data));
-    
     // The API might return the data in a different structure
     let tasks: NozbeTask[] = [];
     
-    if (Array.isArray(response.data)) {
-      tasks = response.data;
-    } else if (response.data && typeof response.data === 'object') {
-      // It might be wrapped in an object
-      console.log("📊 Response keys:", Object.keys(response.data));
-      // Check for common wrapper properties
-      if (response.data.tasks && Array.isArray(response.data.tasks)) {
+    // Check if response.data is an array or an object
+    if (response.data) {
+      if (Array.isArray(response.data)) {
+        tasks = response.data;
+      } else if (typeof response.data === 'object' && response.data.items) {
+        // Check if data is wrapped in an object with 'items' property
+        tasks = response.data.items;
+      } else if (typeof response.data === 'object' && response.data.tasks) {
+        // Check if data is wrapped in an object with 'tasks' property
         tasks = response.data.tasks;
-      } else if (response.data.data && Array.isArray(response.data.data)) {
-        tasks = response.data.data;
       } else {
         // If it's a single object, wrap it in an array
         tasks = [response.data];
       }
     }
     
-    console.log(`✅ Fetched ${tasks.length} tasks from Nozbe`);
     return tasks.filter((task: NozbeTask) => !task.completed);
   } catch (error) {
-    console.error("❌ Error fetching Nozbe tasks:", error);
     throw error;
   }
 }
 
 async function markTaskComplete(taskId: string): Promise<boolean> {
-  console.log(`✅ Marking task ${taskId} as complete in Nozbe`);
   
   try {
     // Use form-encoded data which works with Nozbe API
@@ -112,14 +103,8 @@ async function markTaskComplete(taskId: string): Promise<boolean> {
       }
     );
     
-    console.log(`✅ Task ${taskId} marked as complete`);
     return true;
   } catch (error: any) {
-    console.error(`❌ Error marking task ${taskId} as complete:`, error.message);
-    if (error.response) {
-      console.error("Response status:", error.response.status);
-      console.error("Response data:", error.response.data);
-    }
     return false;
   }
 }
@@ -133,6 +118,12 @@ function buildTaskMessage(tasks: NozbeTask[], channel: string) {
       type: "plain_text",
       text: task.name.length > 75 ? task.name.substring(0, 72) + "..." : task.name,
     },
+    description: task.datetime 
+      ? {
+          type: "plain_text",
+          text: `Due: ${format(new Date(task.datetime), "MMM d, h:mm a")}`,
+        }
+      : undefined,
     value: task.id,
   }));
   
@@ -186,16 +177,12 @@ slackApp.action("task_complete", async ({ action, ack, client, body }) => {
   // Acknowledge the action immediately
   await ack();
   
-  console.log("🔔 Received Slack action");
-  
   // Type guard for checkbox action
   if (action.type === "checkboxes" && body.type === "block_actions" && body.message) {
     const selectedTasks = action.selected_options || [];
     const checkedTaskIds = selectedTasks
       .map((opt) => opt.value)
       .filter((value): value is string => value !== undefined);
-    
-    console.log(`📝 Processing ${checkedTaskIds.length} checked tasks`);
     
     // Mark tasks as complete in Nozbe
     for (const taskId of checkedTaskIds) {
@@ -210,41 +197,61 @@ slackApp.action("task_complete", async ({ action, ack, client, body }) => {
       // Get the current blocks from the message
       const currentBlocks = body.message.blocks || [];
       
-      // Filter out the completed tasks
-      const updatedBlocks = currentBlocks.filter((block: any) => {
-        // Keep non-checkbox blocks (header, context, etc.)
-        if (block.type !== 'section' || !block.accessory?.type || block.accessory.type !== 'checkboxes') {
-          return true;
+      // Update the blocks to remove completed tasks
+      const updatedBlocks: any[] = [];
+      
+      for (const block of currentBlocks) {
+        // For actions blocks with checkboxes, check if tasks remain
+        if (block.type === 'actions') {
+          let hasRemainingTasks = false;
+          const updatedElements = block.elements.map((element: any) => {
+            if (element.type === 'checkboxes') {
+              const remainingOptions = element.options.filter((opt: any) => 
+                !checkedTaskIds.includes(opt.value)
+              );
+              
+              hasRemainingTasks = remainingOptions.length > 0;
+              
+              return {
+                ...element,
+                options: remainingOptions
+              };
+            }
+            return element;
+          });
+          
+          // Only keep actions block if tasks remain
+          if (hasRemainingTasks) {
+            updatedBlocks.push({
+              ...block,
+              elements: updatedElements
+            });
+          } else {
+            updatedBlocks.push({
+              type: "section",
+              text: {
+                type: "mrkdwn",
+                text: "✅ All tasks completed! Great job! 🎉"
+              }
+            });
+          }
+        } else {
+          // Keep all other blocks
+          updatedBlocks.push(block);
         }
-        
-        // For checkbox blocks, check if all options were selected
-        const blockOptions = block.accessory.options || [];
-        const hasUncompletedTasks = blockOptions.some((opt: any) => 
-          !checkedTaskIds.includes(opt.value)
-        );
-        
-        // Keep the block only if it has uncompleted tasks
-        if (hasUncompletedTasks) {
-          // Update the block to remove completed options
-          block.accessory.options = blockOptions.filter((opt: any) => 
-            !checkedTaskIds.includes(opt.value)
-          );
-          return true;
-        }
-        
-        return false;
-      });
+      }
       
       // Update the message
       if (channelId && messageTs) {
-        await client.chat.update({
-          channel: channelId,
-          ts: messageTs,
-          blocks: updatedBlocks,
-          text: "Daily Tasks" // Fallback text
-        });
-        
-        console.log(`✅ Removed ${checkedTaskIds.length} completed task(s) from message`);
+        try {
+          await client.chat.update({
+            channel: channelId,
+            ts: messageTs,
+            blocks: updatedBlocks,
+            text: "Daily Tasks" // Fallback text
+          });
+        } catch (error) {
+        }
       }
     }
   }
@@ -252,13 +259,11 @@ slackApp.action("task_complete", async ({ action, ack, client, body }) => {
 
 // Add custom routes to Express receiver
 receiver.router.get("/trigger", async (_req: any, res: any) => {
-  console.log("🚀 Triggering daily task send");
   
   try {
     await sendDailyTasks();
     res.json({ success: true, message: "Daily tasks sent to Slack" });
   } catch (error) {
-    console.error("❌ Error sending daily tasks:", error);
     res.status(500).json({ success: false, error: "Failed to send tasks" });
   }
 });
@@ -276,20 +281,17 @@ async function getDMChannel(userId: string): Promise<string> {
     });
     
     if (result.ok && result.channel?.id) {
-      console.log(`📬 Opened DM channel: ${result.channel.id}`);
       return result.channel.id;
     }
     
     throw new Error("Failed to open DM channel");
   } catch (error) {
-    console.error("❌ Error opening DM channel:", error);
     throw error;
   }
 }
 
 // Main function to send daily tasks
 async function sendDailyTasks() {
-  console.log(`📅 Starting daily task send at ${new Date().toISOString()}`);
   
   if (!NOZBE_API_KEY) {
     throw new Error("Missing NOZBE_API_KEY. Please obtain it from the 'Settings' section in the Nozbe app");
@@ -304,7 +306,6 @@ async function sendDailyTasks() {
   
   // Clear previous bot messages from the conversation
   try {
-    console.log("🧹 Attempting to clear previous bot messages...");
     
     // Fetch conversation history
     const history = await slackApp.client.conversations.history({
@@ -313,68 +314,60 @@ async function sendDailyTasks() {
     });
     
     if (history.messages) {
-      // Filter for bot messages (sent by this app)
-      const botMessages = history.messages.filter(msg => 
-        msg.bot_id && msg.ts // Only messages from bots with timestamps
-      );
+      // Find and delete bot messages
+      const botMessages = history.messages.filter((msg) => msg.bot_id);
+      
       
       // Delete each bot message
-      for (const message of botMessages) {
-        if (message.ts) {
+      for (const msg of botMessages) {
+        if (msg.ts) {
           try {
             await slackApp.client.chat.delete({
               channel: dmChannel,
-              ts: message.ts,
+              ts: msg.ts,
             });
-            console.log(`🗑️ Deleted message: ${message.ts}`);
           } catch (deleteError) {
-            console.warn(`⚠️ Could not delete message ${message.ts}:`, deleteError);
+            // Silently continue if we can't delete a message
+            // Silently continue if we can't delete a message
           }
         }
       }
       
-      console.log(`✅ Cleared ${botMessages.length} previous bot messages`);
     }
-  } catch (error: any) {
-    if (error?.data?.error === 'missing_scope') {
-      console.error("❌ Missing Slack permissions to read conversation history!");
-      console.error("📌 Required scopes: channels:history, groups:history, im:history, mpim:history");
-      console.error("👉 Please add these scopes in your Slack app configuration at api.slack.com");
-      console.error("👉 After adding scopes, reinstall the app to your workspace");
-    } else {
-      console.error("⚠️ Error clearing previous messages:", error);
-    }
-    console.log("⏭️ Continuing without clearing messages...");
+  } catch (error) {
+    // Continue anyway - not critical if we can't delete old messages
   }
   
   // Fetch tasks from Nozbe
   const tasks = await fetchNozebTasks(NOZBE_PROJECT_ID);
   
   if (tasks.length === 0) {
-    console.log("📭 No tasks found for today");
-    await slackApp.client.chat.postMessage({
+    const message = {
       channel: dmChannel,
-      text: "🎉 No pending tasks found in Nozbe! All caught up!",
-    });
+      text: "🎉 No tasks for today - you're all caught up!",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "🎉 *No tasks for today* - you're all caught up!",
+          },
+        },
+      ],
+    };
+    
+    await slackApp.client.chat.postMessage(message);
     return;
   }
   
-  // Get top 3 tasks (prioritize by next action field if available)
-  const sortedTasks = tasks.sort((a, b) => {
-    if (a.next === true) return -1;
-    if (b.next === true) return 1;
-    return 0;
-  });
+  // Select top 3 tasks
+  const top3Tasks = tasks.slice(0, 3);
   
-  const top3Tasks = sortedTasks.slice(0, 3);
-  console.log(`📌 Selected top ${top3Tasks.length} tasks to send`);
-  
-  // Build and send Slack message
+  // Build and send message
   const message = buildTaskMessage(top3Tasks, dmChannel);
   const result = await slackApp.client.chat.postMessage(message);
   
   if (result.ok) {
-    console.log(`✅ Successfully sent ${top3Tasks.length} tasks to Slack`);
   } else {
     throw new Error(`Failed to send message: ${result.error}`);
   }
@@ -394,5 +387,5 @@ async function sendDailyTasks() {
 
 // Optional: Run immediately if RUN_ON_START env var is set
 if (process.env.RUN_ON_START === "true") {
-  sendDailyTasks().catch(console.error);
+  sendDailyTasks().catch(() => {});
 }
